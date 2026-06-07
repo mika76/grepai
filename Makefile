@@ -1,7 +1,7 @@
 .PHONY: build install test clean lint run docs docs-generate docs-build docs-dev fmt pre-commit nix-hash
 
 BINARY_NAME=grepai
-VERSION?=$(or $(shell git branch --show-current 2>/dev/null),dev)
+VERSION?=0.1.0
 BUILD_DIR=bin
 LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
 
