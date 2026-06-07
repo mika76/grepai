@@ -23,9 +23,11 @@ import (
 
 const (
 	DefaultModelID          = "bge-small-en-v1.5-q8_0"
-	DefaultRuntimeVersion   = "b3426"
+	DefaultRuntimeVersion   = "b9553"
 	DefaultSidecarPort      = 12434
 	runtimeStateFileName    = "llamacpp-runtime.json"
+	runtimeInstallFileName  = ".grepai-runtime.json"
+	runtimeInstallVersion   = 2
 	modelManifestFileName   = "models.json"
 	runtimeDownloadTimeout  = 10 * time.Minute
 	modelDownloadTimeout    = 30 * time.Minute
@@ -74,6 +76,15 @@ type RuntimeState struct {
 	Started  time.Time `json:"started_at"`
 }
 
+type runtimeInstallManifest struct {
+	Installer int    `json:"installer"`
+	Version   string `json:"version"`
+	URL       string `json:"url"`
+	SHA256    string `json:"sha256,omitempty"`
+	Archive   string `json:"archive"`
+	Binary    string `json:"binary"`
+}
+
 var defaultModels = map[string]ModelDefinition{
 	DefaultModelID: {
 		ID:         DefaultModelID,
@@ -110,31 +121,35 @@ var runtimeDefinitions = map[string]RuntimeDefinition{
 		Version:  DefaultRuntimeVersion,
 		Platform: "darwin",
 		Arch:     "arm64",
-		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b3426/llama-b3426-bin-macos-arm64.zip",
-		Archive:  "zip",
+		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b9553/llama-b9553-bin-macos-arm64.tar.gz",
+		SHA256:   "4431d46b552d4e6292934eb1ee7b4fab28b37be751d5ba20af91ed85f4500b57",
+		Archive:  "tar.gz",
 		Binary:   "llama-server",
 	},
 	"darwin/amd64": {
 		Version:  DefaultRuntimeVersion,
 		Platform: "darwin",
 		Arch:     "amd64",
-		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b3426/llama-b3426-bin-macos-x64.zip",
-		Archive:  "zip",
+		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b9553/llama-b9553-bin-macos-x64.tar.gz",
+		SHA256:   "2df2f756a3513053e7961822faa2fb024ca2919c12be781da8c296cb690b1a69",
+		Archive:  "tar.gz",
 		Binary:   "llama-server",
 	},
 	"linux/amd64": {
 		Version:  DefaultRuntimeVersion,
 		Platform: "linux",
 		Arch:     "amd64",
-		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b3426/llama-b3426-bin-ubuntu-x64.zip",
-		Archive:  "zip",
+		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b9553/llama-b9553-bin-ubuntu-x64.tar.gz",
+		SHA256:   "e278c9534d9d5cfcdecababf83bc1315ed684daf52c32bd6596b300009aecdcd",
+		Archive:  "tar.gz",
 		Binary:   "llama-server",
 	},
 	"windows/amd64": {
 		Version:  DefaultRuntimeVersion,
 		Platform: "windows",
 		Arch:     "amd64",
-		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b3426/llama-b3426-bin-win-avx2-x64.zip",
+		URL:      "https://github.com/ggml-org/llama.cpp/releases/download/b9553/llama-b9553-bin-win-cpu-x64.zip",
+		SHA256:   "cfa021204e28f76ada68a259e3f888db1261ee19a03f9fee171b8fe75a3d5226",
 		Archive:  "zip",
 		Binary:   "llama-server.exe",
 	},
@@ -146,6 +161,14 @@ func GetManagedBinDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(root, "bin"), nil
+}
+
+func GetManagedRuntimesDir() (string, error) {
+	root, err := config.GetGlobalConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "runtimes"), nil
 }
 
 func GetManagedModelsDir() (string, error) {
@@ -220,7 +243,7 @@ func LookupCurrentRuntime() (RuntimeDefinition, error) {
 }
 
 func EnsureManagedDirs() error {
-	for _, fn := range []func() (string, error){GetManagedBinDir, GetManagedModelsDir, GetManagedStateDir} {
+	for _, fn := range []func() (string, error){GetManagedBinDir, GetManagedRuntimesDir, GetManagedModelsDir, GetManagedStateDir} {
 		dir, err := fn()
 		if err != nil {
 			return err
@@ -241,11 +264,20 @@ func ManagedModelPath(def ModelDefinition) (string, error) {
 }
 
 func ManagedRuntimeBinaryPath(def RuntimeDefinition) (string, error) {
-	dir, err := GetManagedBinDir()
+	dir, err := ManagedRuntimeInstallDir(def)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, def.Binary), nil
+}
+
+func ManagedRuntimeInstallDir(def RuntimeDefinition) (string, error) {
+	dir, err := GetManagedRuntimesDir()
+	if err != nil {
+		return "", err
+	}
+	target := fmt.Sprintf("%s-%s", def.Platform, def.Arch)
+	return filepath.Join(dir, "llamacpp", def.Version, target), nil
 }
 
 func LoadInstalledModels() ([]InstalledModel, error) {
@@ -391,7 +423,9 @@ func EnsureRuntime(ctx context.Context, progress func(downloaded, total int64)) 
 	if err != nil {
 		return "", RuntimeDefinition{}, err
 	}
-	if st, err := os.Stat(binPath); err == nil && st.Mode().IsRegular() {
+	if ok, err := runtimeInstallIsCurrent(def, binPath); err != nil {
+		return "", RuntimeDefinition{}, err
+	} else if ok {
 		return binPath, def, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, runtimeDownloadTimeout)
@@ -402,17 +436,28 @@ func EnsureRuntime(ctx context.Context, progress func(downloaded, total int64)) 
 	}
 	defer os.RemoveAll(tmpDir)
 	archivePath := filepath.Join(tmpDir, filepath.Base(def.URL))
+	extractDir := filepath.Join(tmpDir, "extract")
 	if err := downloadFile(ctx, def.URL, archivePath, def.SHA256, progress); err != nil {
 		return "", RuntimeDefinition{}, err
 	}
-	if err := extractArchive(archivePath, tmpDir, def.Archive); err != nil {
+	if err := extractArchive(archivePath, extractDir, def.Archive); err != nil {
 		return "", RuntimeDefinition{}, err
 	}
-	extracted, err := findFile(tmpDir, def.Binary)
+	extracted, err := findFile(extractDir, def.Binary)
 	if err != nil {
 		return "", RuntimeDefinition{}, err
 	}
-	if err := copyExecutable(extracted, binPath); err != nil {
+	installDir, err := ManagedRuntimeInstallDir(def)
+	if err != nil {
+		return "", RuntimeDefinition{}, err
+	}
+	if err := os.RemoveAll(installDir); err != nil {
+		return "", RuntimeDefinition{}, fmt.Errorf("failed to remove existing runtime install: %w", err)
+	}
+	if err := copyDirectoryContents(filepath.Dir(extracted), installDir); err != nil {
+		return "", RuntimeDefinition{}, err
+	}
+	if err := saveRuntimeInstallManifest(def, installDir); err != nil {
 		return "", RuntimeDefinition{}, err
 	}
 	return binPath, def, nil
@@ -590,6 +635,17 @@ func extractZip(archivePath, destDir string) error {
 		if err != nil {
 			return err
 		}
+		if f.Mode()&os.ModeSymlink != 0 {
+			linkTargetBytes, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return err
+			}
+			if err := safeCreateSymlink(destDir, target, string(linkTargetBytes)); err != nil {
+				return err
+			}
+			continue
+		}
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, f.Mode())
 		if err != nil {
 			rc.Close()
@@ -652,8 +708,37 @@ func untar(r io.Reader, destDir string) error {
 				return err
 			}
 			out.Close()
+		case tar.TypeSymlink:
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := safeCreateSymlink(destDir, target, hdr.Linkname); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func safeCreateSymlink(destDir, linkPath, linkTarget string) error {
+	if filepath.IsAbs(linkTarget) {
+		return fmt.Errorf("archive symlink %q points to absolute target %q", linkPath, linkTarget)
+	}
+	resolved, err := safeArchiveTarget(filepath.Dir(linkPath), linkTarget)
+	if err != nil {
+		return err
+	}
+	destAbs, err := filepath.Abs(destDir)
+	if err != nil {
+		return err
+	}
+	resolvedAbs, err := filepath.Abs(resolved)
+	if err != nil {
+		return err
+	}
+	if resolvedAbs != destAbs && !strings.HasPrefix(resolvedAbs, destAbs+string(os.PathSeparator)) {
+		return fmt.Errorf("archive symlink %q escapes destination", linkPath)
+	}
+	return os.Symlink(linkTarget, linkPath)
 }
 
 func safeArchiveTarget(destDir, name string) (string, error) {
@@ -700,13 +785,98 @@ func findFile(root, fileName string) (string, error) {
 	return found, nil
 }
 
-func copyExecutable(src, dst string) error {
+func runtimeInstallIsCurrent(def RuntimeDefinition, binPath string) (bool, error) {
+	if st, err := os.Stat(binPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	} else if !st.Mode().IsRegular() {
+		return false, nil
+	}
+	installDir, err := ManagedRuntimeInstallDir(def)
+	if err != nil {
+		return false, err
+	}
+	data, err := os.ReadFile(filepath.Join(installDir, runtimeInstallFileName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read runtime install manifest: %w", err)
+	}
+	var manifest runtimeInstallManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return false, nil
+	}
+	return manifest == runtimeManifestForDefinition(def), nil
+}
+
+func saveRuntimeInstallManifest(def RuntimeDefinition, installDir string) error {
+	data, err := json.MarshalIndent(runtimeManifestForDefinition(def), "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal runtime install manifest: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, runtimeInstallFileName), data, 0o600); err != nil {
+		return fmt.Errorf("failed to write runtime install manifest: %w", err)
+	}
+	return nil
+}
+
+func runtimeManifestForDefinition(def RuntimeDefinition) runtimeInstallManifest {
+	return runtimeInstallManifest{
+		Installer: runtimeInstallVersion,
+		Version:   def.Version,
+		URL:       def.URL,
+		SHA256:    def.SHA256,
+		Archive:   def.Archive,
+		Binary:    def.Binary,
+	}
+}
+
+func copyDirectoryContents(srcDir, dstDir string) error {
+	return filepath.Walk(srcDir, func(src string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcDir, src)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dstDir, 0o755)
+		}
+		dst := filepath.Join(dstDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dst, info.Mode())
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			targetInfo, err := os.Stat(src)
+			if err != nil {
+				return err
+			}
+			if !targetInfo.Mode().IsRegular() {
+				return nil
+			}
+			return copyFile(src, dst, targetInfo.Mode())
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		return copyFile(src, dst, info.Mode())
+	})
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
 	data, err := os.ReadFile(src)
 	if err != nil {
-		return fmt.Errorf("failed to read executable: %w", err)
+		return fmt.Errorf("failed to read runtime file: %w", err)
 	}
-	if err := os.WriteFile(dst, data, 0o755); err != nil {
-		return fmt.Errorf("failed to install executable: %w", err)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("failed to create runtime directory: %w", err)
+	}
+	if err := os.WriteFile(dst, data, mode); err != nil {
+		return fmt.Errorf("failed to install runtime file: %w", err)
 	}
 	return nil
 }

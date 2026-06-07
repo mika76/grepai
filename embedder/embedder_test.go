@@ -214,6 +214,62 @@ func TestLlamaCPPWaitForHealthWithinTimesOut(t *testing.T) {
 	}
 }
 
+func TestDecodeLlamaCPPEmbeddingResponseShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []float32
+	}{
+		{
+			name: "legacy embedding object",
+			body: `{"embedding":[1.25,2.5]}`,
+			want: []float32{1.25, 2.5},
+		},
+		{
+			name: "openai data object",
+			body: `{"data":[{"embedding":[3,4]}]}`,
+			want: []float32{3, 4},
+		},
+		{
+			name: "raw vector",
+			body: `[5,6]`,
+			want: []float32{5, 6},
+		},
+		{
+			name: "vector list",
+			body: `[[7,8]]`,
+			want: []float32{7, 8},
+		},
+		{
+			name: "item list",
+			body: `[{"embedding":[9,10]}]`,
+			want: []float32{9, 10},
+		},
+		{
+			name: "llama.cpp b9553 item list",
+			body: `[{"index":0,"embedding":[[11,12]]}]`,
+			want: []float32{11, 12},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeLlamaCPPEmbedding([]byte(tt.body))
+			if err != nil {
+				t.Fatalf("decodeLlamaCPPEmbedding failed: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("embedding length = %d, want %d", len(got), len(tt.want))
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("embedding[%d] = %v, want %v", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestLlamaCPPEmbedder_EnsureRunningReusesHealthyEndpointWithoutPIDProbe(t *testing.T) {
 	tmpDir := t.TempDir()
 	cleanup := setEmbedderTestHome(t, tmpDir)

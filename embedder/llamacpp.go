@@ -47,6 +47,14 @@ type llamaCPPEmbedResponse struct {
 	} `json:"data"`
 }
 
+type llamaCPPEmbeddingItem struct {
+	Embedding []float32 `json:"embedding"`
+}
+
+type llamaCPPEmbeddingRawItem struct {
+	Embedding json.RawMessage `json:"embedding"`
+}
+
 func WithLlamaCPPModel(model string) LlamaCPPOption {
 	return func(e *LlamaCPPEmbedder) {
 		e.model = model
@@ -152,18 +160,14 @@ func (e *LlamaCPPEmbedder) EmbedWithRole(ctx context.Context, text string, role 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("llama.cpp returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	var result llamaCPPEmbedResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
+	embedding, err := decodeLlamaCPPEmbedding(respBody)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode llama.cpp response: %w", err)
 	}
-	switch {
-	case len(result.Embedding) > 0:
-		return result.Embedding, nil
-	case len(result.Data) > 0 && len(result.Data[0].Embedding) > 0:
-		return result.Data[0].Embedding, nil
-	default:
+	if len(embedding) == 0 {
 		return nil, fmt.Errorf("llama.cpp returned empty embedding")
 	}
+	return embedding, nil
 }
 
 func (e *LlamaCPPEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
@@ -194,6 +198,80 @@ func (e *LlamaCPPEmbedder) applyRolePrefix(text string, role InputRole) string {
 		}
 	}
 	return text
+}
+
+func decodeLlamaCPPEmbedding(body []byte) ([]float32, error) {
+	var result llamaCPPEmbedResponse
+	if err := json.Unmarshal(body, &result); err == nil {
+		switch {
+		case len(result.Embedding) > 0:
+			return result.Embedding, nil
+		case len(result.Data) > 0 && len(result.Data[0].Embedding) > 0:
+			return result.Data[0].Embedding, nil
+		}
+	}
+
+	var rawResult struct {
+		Embedding json.RawMessage            `json:"embedding"`
+		Data      []llamaCPPEmbeddingRawItem `json:"data"`
+	}
+	if err := json.Unmarshal(body, &rawResult); err == nil {
+		if len(rawResult.Embedding) > 0 {
+			if embedding, err := decodeLlamaCPPEmbeddingValue(rawResult.Embedding); err != nil {
+				return nil, err
+			} else if len(embedding) > 0 {
+				return embedding, nil
+			}
+		}
+		if len(rawResult.Data) > 0 && len(rawResult.Data[0].Embedding) > 0 {
+			if embedding, err := decodeLlamaCPPEmbeddingValue(rawResult.Data[0].Embedding); err != nil {
+				return nil, err
+			} else if len(embedding) > 0 {
+				return embedding, nil
+			}
+		}
+	}
+
+	var vector []float32
+	if err := json.Unmarshal(body, &vector); err == nil && len(vector) > 0 {
+		return vector, nil
+	}
+
+	var vectors [][]float32
+	if err := json.Unmarshal(body, &vectors); err == nil && len(vectors) > 0 && len(vectors[0]) > 0 {
+		return vectors[0], nil
+	}
+
+	var items []llamaCPPEmbeddingItem
+	if err := json.Unmarshal(body, &items); err == nil && len(items) > 0 && len(items[0].Embedding) > 0 {
+		return items[0].Embedding, nil
+	}
+
+	var rawItems []llamaCPPEmbeddingRawItem
+	if err := json.Unmarshal(body, &rawItems); err == nil && len(rawItems) > 0 && len(rawItems[0].Embedding) > 0 {
+		if embedding, err := decodeLlamaCPPEmbeddingValue(rawItems[0].Embedding); err != nil {
+			return nil, err
+		} else if len(embedding) > 0 {
+			return embedding, nil
+		}
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func decodeLlamaCPPEmbeddingValue(raw json.RawMessage) ([]float32, error) {
+	var vector []float32
+	if err := json.Unmarshal(raw, &vector); err == nil {
+		return vector, nil
+	}
+	var vectors [][]float32
+	if err := json.Unmarshal(raw, &vectors); err == nil && len(vectors) > 0 {
+		return vectors[0], nil
+	}
+	return nil, nil
 }
 
 func (e *LlamaCPPEmbedder) Dimensions() int {
@@ -232,7 +310,12 @@ func (e *LlamaCPPEmbedder) ensureRunning(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if state != nil && state.Binary == e.runtimePath && state.Endpoint == e.endpoint {
+	if state != nil &&
+		state.Version == managedassets.DefaultRuntimeVersion &&
+		state.Platform == runtime.GOOS &&
+		state.Arch == runtime.GOARCH &&
+		state.Binary == e.runtimePath &&
+		state.Endpoint == e.endpoint {
 		if ok := waitForHealthWithin(ctx, e.client, e.endpoint, 250*time.Millisecond, 250*time.Millisecond); ok {
 			return nil
 		}

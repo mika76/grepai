@@ -16,7 +16,7 @@ Embedders convert text (code chunks) into vector representations that enable sem
 
 ## llama.cpp (Managed Local)
 
-grepai can manage a local `llama.cpp` embedding runtime for you. Model files and runtime binaries are stored globally under `~/.grepai`, while each project keeps only its local selection in `.grepai/config.yaml`.
+grepai can manage a local `llama.cpp` embedding runtime for you. Model files and versioned runtime binaries are stored globally under `~/.grepai`, while each project keeps only its local selection in `.grepai/config.yaml`.
 
 Current managed runtime support:
 - macOS `arm64`
@@ -79,8 +79,10 @@ The managed sidecar endpoint should be a local HTTP URL with an explicit port, f
 ### Managed Assets
 
 - Models: `~/.grepai/models`
-- Runtime binaries: `~/.grepai/bin`
+- Runtime binaries: `~/.grepai/runtimes/llamacpp/<version>/<platform>-<arch>`
 - Runtime metadata/state: `~/.grepai/state`
+
+Managed runtime downloads are pinned to a tested `llama.cpp` release and verified with SHA256 checksums. When grepai updates the pinned runtime, the new binary is installed into its own versioned cache path instead of reusing an older `llama-server`.
 
 ### Model Commands
 
