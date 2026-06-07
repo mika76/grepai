@@ -1,6 +1,7 @@
 package embedder
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -80,6 +81,9 @@ func TestNewFromConfig_LMStudio(t *testing.T) {
 func TestNewFromConfig_LlamaCPP(t *testing.T) {
 	tmpDir := t.TempDir()
 	modelPath := filepath.Join(tmpDir, "embedding.gguf")
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0o600); err != nil {
+		t.Fatalf("failed to create model file: %v", err)
+	}
 	cfg := &config.Config{
 		Embedder: config.EmbedderConfig{
 			Provider:  "llamacpp",

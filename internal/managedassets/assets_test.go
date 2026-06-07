@@ -1,10 +1,15 @@
 package managedassets
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func setTestHomeDir(t *testing.T, dir string) func() {
@@ -64,9 +69,100 @@ func TestSaveAndLoadInstalledModels(t *testing.T) {
 	}
 }
 
+func TestResolveModelPathRequiresExistingRegularFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	cleanup := setTestHomeDir(t, tmpDir)
+	defer cleanup()
+
+	missing := filepath.Join(tmpDir, "missing.gguf")
+	if err := SaveInstalledModels([]InstalledModel{{
+		ID:         DefaultModelID,
+		FileName:   "missing.gguf",
+		Path:       missing,
+		Dimensions: 384,
+	}}); err != nil {
+		t.Fatalf("SaveInstalledModels failed: %v", err)
+	}
+
+	if _, _, err := ResolveModelPath(DefaultModelID, ""); err == nil {
+		t.Fatal("expected missing installed model file to fail")
+	}
+
+	modelPath := filepath.Join(tmpDir, "model.gguf")
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0o600); err != nil {
+		t.Fatalf("failed to create model file: %v", err)
+	}
+	if got, dims, err := ResolveModelPath("", modelPath); err != nil {
+		t.Fatalf("ResolveModelPath override failed: %v", err)
+	} else if got != modelPath || dims != defaultEmbeddingDimSize {
+		t.Fatalf("override path/dims = %q/%d", got, dims)
+	}
+}
+
 func TestLookupCurrentRuntime(t *testing.T) {
 	if _, err := LookupCurrentRuntime(); err != nil {
 		t.Fatalf("LookupCurrentRuntime failed for %s/%s: %v", runtime.GOOS, runtime.GOARCH, err)
+	}
+}
+
+func TestExtractZipRejectsPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	archivePath := filepath.Join(tmpDir, "bad.zip")
+
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("failed to create zip: %v", err)
+	}
+	zw := zip.NewWriter(f)
+	w, err := zw.Create("../escape")
+	if err != nil {
+		t.Fatalf("failed to create zip entry: %v", err)
+	}
+	if _, err := w.Write([]byte("bad")); err != nil {
+		t.Fatalf("failed to write zip entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("failed to close zip: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("failed to close file: %v", err)
+	}
+
+	if err := extractZip(archivePath, filepath.Join(tmpDir, "out")); err == nil {
+		t.Fatal("expected path traversal zip to fail")
+	}
+}
+
+func TestExtractTarGzRejectsPathTraversal(t *testing.T) {
+	tmpDir := t.TempDir()
+	archivePath := filepath.Join(tmpDir, "bad.tar.gz")
+
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:    "../escape",
+		Mode:    0o600,
+		Size:    int64(len("bad")),
+		ModTime: time.Now(),
+	}); err != nil {
+		t.Fatalf("failed to write tar header: %v", err)
+	}
+	if _, err := tw.Write([]byte("bad")); err != nil {
+		t.Fatalf("failed to write tar content: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("failed to close tar: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("failed to close gzip: %v", err)
+	}
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0o600); err != nil {
+		t.Fatalf("failed to write archive: %v", err)
+	}
+
+	if err := extractTarGz(archivePath, filepath.Join(tmpDir, "out")); err == nil {
+		t.Fatal("expected path traversal tar.gz to fail")
 	}
 }
 

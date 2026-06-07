@@ -420,6 +420,11 @@ func EnsureRuntime(ctx context.Context, progress func(downloaded, total int64)) 
 
 func ResolveModelPath(id, override string) (string, int, error) {
 	if strings.TrimSpace(override) != "" {
+		if st, err := os.Stat(override); err != nil {
+			return "", 0, fmt.Errorf("managed model path %q is not accessible: %w", override, err)
+		} else if !st.Mode().IsRegular() {
+			return "", 0, fmt.Errorf("managed model path %q is not a regular file", override)
+		}
 		return override, defaultEmbeddingDimSize, nil
 	}
 	if id == "" {
@@ -431,6 +436,11 @@ func ResolveModelPath(id, override string) (string, int, error) {
 	}
 	if installed == nil {
 		return "", 0, fmt.Errorf("managed model %q is not installed; run 'grepai model install %s'", id, id)
+	}
+	if st, err := os.Stat(installed.Path); err != nil {
+		return "", 0, fmt.Errorf("managed model %q is installed but its file is missing or inaccessible at %s; run 'grepai model install %s' again: %w", id, installed.Path, id, err)
+	} else if !st.Mode().IsRegular() {
+		return "", 0, fmt.Errorf("managed model %q path %s is not a regular file", id, installed.Path)
 	}
 	return installed.Path, installed.Dimensions, nil
 }
@@ -497,6 +507,7 @@ func downloadFile(ctx context.Context, url, dest, checksum string, progress func
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 	tmp := dest + ".tmp"
+	defer os.Remove(tmp)
 	f, err := os.Create(tmp)
 	if err != nil {
 		return fmt.Errorf("failed to create temporary file: %w", err)
@@ -562,7 +573,10 @@ func extractZip(archivePath, destDir string) error {
 	}
 	defer r.Close()
 	for _, f := range r.File {
-		target := filepath.Join(destDir, f.Name)
+		target, err := safeArchiveTarget(destDir, f.Name)
+		if err != nil {
+			return err
+		}
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
@@ -616,7 +630,10 @@ func untar(r io.Reader, destDir string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(destDir, hdr.Name)
+		target, err := safeArchiveTarget(destDir, hdr.Name)
+		if err != nil {
+			return err
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o755); err != nil {
@@ -637,6 +654,26 @@ func untar(r io.Reader, destDir string) error {
 			out.Close()
 		}
 	}
+}
+
+func safeArchiveTarget(destDir, name string) (string, error) {
+	cleanName := filepath.Clean(name)
+	if filepath.IsAbs(cleanName) || cleanName == "." || strings.HasPrefix(cleanName, ".."+string(os.PathSeparator)) || cleanName == ".." {
+		return "", fmt.Errorf("archive entry %q escapes destination", name)
+	}
+	target := filepath.Join(destDir, cleanName)
+	destAbs, err := filepath.Abs(destDir)
+	if err != nil {
+		return "", err
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return "", err
+	}
+	if targetAbs != destAbs && !strings.HasPrefix(targetAbs, destAbs+string(os.PathSeparator)) {
+		return "", fmt.Errorf("archive entry %q escapes destination", name)
+	}
+	return target, nil
 }
 
 func findFile(root, fileName string) (string, error) {

@@ -155,6 +155,9 @@ func TestLlamaCPPEmbedder_AppliesRolePrefixes(t *testing.T) {
 func TestNewLlamaCPPEmbedder_LoadsNomicModelMetadata(t *testing.T) {
 	tmpDir := t.TempDir()
 	modelPath := filepath.Join(tmpDir, "nomic.gguf")
+	if err := os.WriteFile(modelPath, []byte("gguf"), 0o600); err != nil {
+		t.Fatalf("failed to create model file: %v", err)
+	}
 	e, err := NewLlamaCPPEmbedder(
 		WithLlamaCPPModel("nomic-embed-text-v1.5-q8_0"),
 		WithLlamaCPPModelPath(modelPath),
@@ -167,6 +170,30 @@ func TestNewLlamaCPPEmbedder_LoadsNomicModelMetadata(t *testing.T) {
 	}
 	if e.docPrefix != "search_document: " {
 		t.Fatalf("doc prefix = %q", e.docPrefix)
+	}
+}
+
+func TestLlamaCPPSidecarHostPort(t *testing.T) {
+	host, port, err := sidecarHostPort("http://127.0.0.1:12434")
+	if err != nil {
+		t.Fatalf("sidecarHostPort failed: %v", err)
+	}
+	if host != "127.0.0.1" || port != 12434 {
+		t.Fatalf("host/port = %s/%d", host, port)
+	}
+
+	host, port, err = sidecarHostPort("http://localhost:12434/v1")
+	if err != nil {
+		t.Fatalf("sidecarHostPort with path failed: %v", err)
+	}
+	if host != "localhost" || port != 12434 {
+		t.Fatalf("host/port with path = %s/%d", host, port)
+	}
+
+	for _, endpoint := range []string{"127.0.0.1:12434", "http://127.0.0.1", "https://127.0.0.1:12434", "ftp://127.0.0.1:12434", "http://127.0.0.1:99999"} {
+		if _, _, err := sidecarHostPort(endpoint); err == nil {
+			t.Fatalf("expected error for endpoint %q", endpoint)
+		}
 	}
 }
 

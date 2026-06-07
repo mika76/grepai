@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -249,14 +249,9 @@ func (e *LlamaCPPEmbedder) startSidecar(ctx context.Context) error {
 		return err
 	}
 	e.runtimePath = runtimePath
-	u, err := net.ResolveTCPAddr("tcp", strings.TrimPrefix(strings.TrimPrefix(e.endpoint, "http://"), "https://"))
+	host, port, err := sidecarHostPort(e.endpoint)
 	if err != nil {
-		return fmt.Errorf("invalid llama.cpp endpoint %s: %w", e.endpoint, err)
-	}
-	port := u.Port
-	host := u.IP.String()
-	if host == "" || host == "<nil>" {
-		host = "127.0.0.1"
+		return err
 	}
 	cmd := exec.CommandContext(ctx, e.runtimePath,
 		"--host", host,
@@ -296,6 +291,7 @@ func (e *LlamaCPPEmbedder) startSidecar(ctx context.Context) error {
 		Started:  time.Now().UTC(),
 	}
 	if err := managedassets.SaveRuntimeState(state); err != nil {
+		_ = cmd.Process.Kill()
 		return err
 	}
 	healthCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -305,6 +301,29 @@ func (e *LlamaCPPEmbedder) startSidecar(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func sidecarHostPort(endpoint string) (string, int, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", 0, fmt.Errorf("invalid llama.cpp endpoint %s: %w", endpoint, err)
+	}
+	if u.Scheme != "http" {
+		return "", 0, fmt.Errorf("invalid managed llama.cpp endpoint %s: scheme must be http", endpoint)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", 0, fmt.Errorf("invalid llama.cpp endpoint %s: missing host", endpoint)
+	}
+	portText := u.Port()
+	if portText == "" {
+		return "", 0, fmt.Errorf("invalid llama.cpp endpoint %s: missing port", endpoint)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return "", 0, fmt.Errorf("invalid llama.cpp endpoint %s: invalid port", endpoint)
+	}
+	return host, port, nil
 }
 
 func waitForHealth(ctx context.Context, client *http.Client, endpoint string, interval time.Duration) bool {
