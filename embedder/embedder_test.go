@@ -197,6 +197,23 @@ func TestLlamaCPPSidecarHostPort(t *testing.T) {
 	}
 }
 
+func TestLlamaCPPWaitForHealthWithinTimesOut(t *testing.T) {
+	start := time.Now()
+	ok := waitForHealthWithin(
+		context.Background(),
+		&http.Client{Timeout: 50 * time.Millisecond},
+		"http://127.0.0.1:1",
+		10*time.Millisecond,
+		100*time.Millisecond,
+	)
+	if ok {
+		t.Fatal("expected unavailable endpoint to be unhealthy")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("health wait took too long: %s", elapsed)
+	}
+}
+
 func TestLlamaCPPEmbedder_EnsureRunningReusesHealthyEndpointWithoutPIDProbe(t *testing.T) {
 	tmpDir := t.TempDir()
 	cleanup := setEmbedderTestHome(t, tmpDir)

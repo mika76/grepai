@@ -224,7 +224,7 @@ func (e *LlamaCPPEmbedder) Ping(ctx context.Context) error {
 }
 
 func (e *LlamaCPPEmbedder) ensureRunning(ctx context.Context) error {
-	if ok := waitForHealth(ctx, e.client, e.endpoint, 250*time.Millisecond); ok {
+	if ok := waitForHealthWithin(ctx, e.client, e.endpoint, 250*time.Millisecond, 250*time.Millisecond); ok {
 		return nil
 	}
 
@@ -233,7 +233,7 @@ func (e *LlamaCPPEmbedder) ensureRunning(ctx context.Context) error {
 		return err
 	}
 	if state != nil && state.Binary == e.runtimePath && state.Endpoint == e.endpoint {
-		if ok := waitForHealth(ctx, e.client, e.endpoint, 250*time.Millisecond); ok {
+		if ok := waitForHealthWithin(ctx, e.client, e.endpoint, 250*time.Millisecond, 250*time.Millisecond); ok {
 			return nil
 		}
 	}
@@ -344,6 +344,15 @@ func waitForHealth(ctx context.Context, client *http.Client, endpoint string, in
 		case <-ticker.C:
 		}
 	}
+}
+
+func waitForHealthWithin(ctx context.Context, client *http.Client, endpoint string, interval, timeout time.Duration) bool {
+	if timeout <= 0 {
+		return waitForHealth(ctx, client, endpoint, interval)
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return waitForHealth(healthCtx, client, endpoint, interval)
 }
 
 func waitForRuntimeReady(ctx context.Context, client *http.Client, endpoint string, done <-chan error) error {
