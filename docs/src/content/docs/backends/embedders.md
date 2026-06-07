@@ -72,6 +72,10 @@ embedder:
   endpoint: http://127.0.0.1:12434
 ```
 
+The `model_path` override must point to an existing regular local GGUF file. Managed model selections are also validated against the on-disk model file before indexing starts; if a file was removed outside `grepai model remove`, run `grepai model install <model-id>` again.
+
+The managed sidecar endpoint should be a local HTTP URL with an explicit port, for example `http://127.0.0.1:12434`.
+
 ### Managed Assets
 
 - Models: `~/.grepai/models`
